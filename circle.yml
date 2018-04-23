@@ -1,0 +1,72 @@
+machine:
+  timezone:
+    America/Los_Angeles
+  hosts:
+    elegantthemesdev.com: 127.0.0.1
+    circleci-container.com: 127.0.0.1
+  php:
+    version: 5.5.21
+  node:
+    version: 5.5.0
+  environment:
+    BS_PROJECT: ${CIRCLE_PROJECT_REPONAME:-ETDev}
+    BS_BUILD: "CCI Build No. ${CIRCLE_BUILD_NUM}"
+    BS_NAME: "Branch ${CIRCLE_BRANCH} ${CIRCLE_PR_NUMBER:+ PR No. }${CIRCLE_PR_NUMBER}"
+    PHPVER: 5.5.21
+    WPCLI_URL: 'https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar'
+    _REPO: ${CIRCLE_PROJECT_REPONAME:-Divi}
+    REPO_DIR: ${HOME}/${_REPO}
+    _TESTS_DIR: ${REPO_DIR}/core/tests
+    TESTS_DIR: ${REPO_DIR}/tests
+    WWWCONF_DIR: /etc/apache2/sites-available
+    BASE_URL: 'http://elegantthemesdev.com:8080'
+
+general:
+  branches:
+    only:
+      - master
+
+checkout:
+  post:
+    # Init submodules
+    - cd ${REPO_DIR} && git submodule sync && git submodule update --init
+    # Symlink composer's vendor dir to our cached copy
+    - cd ${REPO_DIR} && { [[ -d ../vendor ]] || mkdir ../vendor || true; } && ln -s ../vendor vendor
+    # Symlink tests dir into project repo root dir
+    - ln -s ${_TESTS_DIR} ${TESTS_DIR}
+
+dependencies:
+  cache_directories:
+    - ~/vendor
+    - ~/wordpress
+  post:
+    - source ${TESTS_DIR}/_ci/setup_env.sh
+
+test:
+  pre:
+    # This is just for us to see that the Divi was actually installed and is active
+    - ~/wp-cli.phar theme list
+
+  override:
+    # Start the BrowserStack binary
+    - ~/BrowserStackLocal -v -forcelocal ${BROWSERSTACK_KEY}:
+        background: true
+
+    # Build Codeception suite.
+    - sleep 8 && cd ${REPO_DIR} && vendor/bin/codecept build -c ./codeception.yml
+
+    # Wait for site to be ready
+    - curl --retry 10 --retry-delay 2 -v http://elegantthemesdev.com:8080
+
+    # Run tests
+    - cd ${REPO_DIR} && vendor/bin/robo parallel:all
+
+    # Check code style with PHP-CS
+    - CHANGES=$(/usr/bin/php ${TESTS_DIR}/_ci/get-changed-files.php); echo "${CHANGES}"; phpcs --standard=WordPress-Extra "${CHANGES}"
+
+  post:
+    - "{ mkdir ${CIRCLE_TEST_REPORTS}/phpunit && cp ${TESTS_DIR}/_output/result.xml ${CIRCLE_TEST_REPORTS}/phpunit; } || true"
+    - "cp  -R /var/log/apache2 ${CIRCLE_TEST_REPORTS} || true"
+    - "cp -R ${TESTS_DIR}/_output/record_* ${CIRCLE_TEST_REPORTS} || true"
+    - "{ cd ${TESTS_DIR}/_output && cp -t ${CIRCLE_TEST_REPORTS} records.html failed *.failed.* *.log; } || true"
+    - "[[ -f ~/wordpress/wp-content/debug.log ]] && cp ~/wordpress/wp-content/debug.log ${CIRCLE_TEST_REPORTS} || true"
